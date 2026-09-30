@@ -146,6 +146,9 @@ multi_agents/                   # 另一套 LangGraph / AG2 多 Agent 路径
 | Phase 4 | [14 架构评价与对比](docs/14-design-analysis.md) | 与 Claude Code / Nanobot / ReAct 的异同是什么？ |
 | Phase 5 | [15 面试与简历](docs/15-interview-and-resume.md) | 怎么把“读过源码”转化成可验证的项目能力？ |
 | Phase 5 | [16 二次开发路线](docs/16-hands-on-roadmap.md) | 如何把学习项目升级成真正属于自己的项目？ |
+| Phase 5 | [17 Tests 与 Evals](docs/17-testing-and-evals.md) | 怎样从测试反推历史 Bug，并建立 Agent 质量评测？ |
+| Phase 5 | [18 Multi-Agent LangGraph](docs/18-multi-agent-langgraph.md) | 独立多 Agent 路径如何做角色分工、并行研究与审核闭环？ |
+| Appendix | [99 Source Snapshot](docs/99-source-snapshot.md) | 固定上游提交与参考范围，避免版本漂移。 |
 
 ## 建议的阅读顺序
 
