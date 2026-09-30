@@ -1,259 +1,286 @@
 # DeepResearchNotebook
 
-> 面向 **AI Agent / LLM 应用开发岗位** 的 GPT Researcher 源码学习笔记。  
-> 目标不是“会调用一个 Deep Research API”，而是把一个真实开源 Research Agent 的核心链路拆开：**任务理解 → 角色生成 → 研究规划 → 多路检索 → 网页抓取 → Context Engineering → 报告生成 → Deep Research → 子 Agent → MCP → 并发/容错/成本/可观测性**。
+<p align="center">
+  <strong>面向 Agent 开发求职的 GPT Researcher 源码学习指南</strong>
+</p>
 
-> [!IMPORTANT]
-> 本仓库是个人学习与源码分析笔记，不是 GPT Researcher 官方文档。分析基于 `assafelovic/gpt-researcher` 的 `main` 分支提交 **`0957c301ed06c2a5857b834358c7227c739041d4`（2026-09-26）**。上游持续演进，阅读时请优先结合对应源码快照。
+> 🎯 **这份仓库写给谁？**  
+> 写给“知道 LLM / RAG 是什么，但第一次读完整 Agent 项目”的开发者。你不需要提前熟悉 GPT Researcher，也不需要先懂 LangGraph、MCP 或复杂的 Agent 框架。
 
-## 为什么做这份笔记
+---
 
-如果目标是求职 Agent 开发岗位，只把 GPT Researcher 写进简历远远不够。面试真正容易被追问的是：
+## 为什么重写这份笔记
 
-- 它到底是不是 ReAct Agent？它的“Agent Loop”在哪里？
-- 一条用户 Query 是怎样被拆成 Sub-Queries 的？
-- 搜索结果为什么不能直接塞进 Prompt？
-- Retriever、Scraper、Context Filter、Writer 各自负责什么？
-- Web / Local / Hybrid / Vector Store / MCP 五类来源怎么统一？
-- 为什么项目要区分 `FAST_LLM`、`SMART_LLM`、`STRATEGIC_LLM`？
-- Deep Research 与普通 Research 有什么本质差异？
-- Detailed Report 为什么会创建子 Researcher？如何避免章节重复？
-- 并发在哪里？哪些地方会有 race condition？项目怎么处理？
-- LLM 输出 JSON 不稳定时怎么恢复？
-- 搜索、抓取、Embedding、LLM 任一环节失败时怎么降级？
-- 这个项目有哪些设计值得复用，又有哪些地方你会重构？
+第一次版本的问题很明显：**知道项目的人看得懂，不知道项目的人看不进去。**
 
-这份仓库围绕这些问题组织，而不是围绕“怎么安装、怎么点 UI”组织。
-
-## 一句话理解 GPT Researcher
-
-**GPT Researcher 不是一个通用的“LLM → Tool → Observation → 再调用 LLM”的无限 ReAct 循环，而是一个面向 Research 任务的、强流程约束的 Agent Workflow。**
-
-它把研究行为拆成稳定流水线：
+所以这一版不再从“Facade、Provider、Context Filter”这些架构名词直接开讲，而是采用一条更适合学习源码的路线：
 
 ```text
-User Query
-    │
-    ▼
-GPTResearcher                 ← Facade / Orchestrator
-    │
-    ├── choose_agent()        ← 根据任务生成研究角色
-    │
-    ▼
+先知道它解决什么问题
+        ↓
+先跑通一次完整研究
+        ↓
+知道每一步的数据长什么样
+        ↓
+再看整体架构
+        ↓
+再逐文件进入源码
+        ↓
+最后讨论并发、容错、成本、评测和二次开发
+```
+
+文档写法参考了 [learn-nanobot](https://github.com/bcefghj/learn-nanobot) 的教学方法：**目标明确、渐进披露、图示优先、关键源码逐段解释、每节最后总结设计价值和面试要点**。内容本身全部围绕 GPT Researcher 源码重新分析。
+
+---
+
+## 先用一句话理解 GPT Researcher
+
+假设用户问：
+
+> **“帮我研究 AI Coding Agent 的技术路线、主要产品和未来趋势，并给出有来源的报告。”**
+
+普通聊天模型会倾向于直接生成答案。
+
+GPT Researcher 的思路是：
+
+```text
+1. 先理解任务
+2. 决定应该以什么“研究员角色”处理
+3. 先搜一轮，了解当前世界里有哪些信息
+4. 把大问题拆成多个小问题
+5. 并行搜索这些小问题
+6. 打开网页、读取正文
+7. 从大量正文里筛选真正相关的证据
+8. 汇总证据
+9. 最后让 Writer 基于证据写报告
+```
+
+也就是说：
+
+> **它不是“让 LLM 多想几步”，而是把研究过程工程化。**
+
+---
+
+## 一张图看懂普通 Research
+
+```text
+用户问题
+  │
+  ▼
+GPTResearcher
+  │
+  ├─ 生成研究角色
+  │
+  ▼
 ResearchConductor
-    │
-    ├── Initial Search
-    ├── Plan Research
-    │     └── Strategic LLM → Sub Queries
-    │
-    ├── asyncio.gather(Sub Queries)
-    │      ├── Retriever(s)
-    │      ├── MCP Retriever
-    │      ├── URL Dedup
-    │      ├── Browser / Scraper
-    │      └── Context Selection / Compression
-    │
-    ├── Aggregate Context
-    └── Optional Source Curation
-           │
-           ▼
+  │
+  ├─ Initial Search
+  │      └─ 先获取少量外部信息
+  │
+  ├─ Planning
+  │      └─ Strategic LLM 生成 Sub Queries
+  │
+  ├─ 并行研究多个 Sub Query
+  │      ├─ Retriever 找 URL / 全文
+  │      ├─ Browser/Scraper 读取网页
+  │      └─ ContextManager 过滤证据
+  │
+  └─ 汇总 Context
+         │
+         ▼
 ReportGenerator
-    │
-    ├── Prompt by Report Type
-    ├── Smart LLM
-    └── Markdown Report
+  │
+  └─ Smart LLM 基于证据写最终报告
 ```
 
-而 `DeepResearchSkill` 会在这套常规 Research Pipeline 之上再加一层**递归式探索**：
+这条链路是整个仓库的主线。
 
-```text
-Query
-  └── breadth 个 Search Queries
-       ├── Nested GPTResearcher
-       │    └── Learnings + Follow-up Questions
-       ├── Nested GPTResearcher
-       │    └── Learnings + Follow-up Questions
-       └── ...
-              │
-              └── depth > 1 → 继续向下探索
-```
+---
 
-这也是本项目最值得学习的地方：**Agent 不一定必须是一条开放式 ReAct Loop；对于垂直任务，显式 Workflow + 有限自治往往更稳定、更便宜、更容易测试。**
+## 为什么它值得 Agent 岗位学习
 
-## 源码全景
+这个项目同时覆盖了 Agent 开发中非常典型的工程问题：
 
-核心代码位于：
+| 能力 | GPT Researcher 中的实现 |
+|---|---|
+| Planning | Query Decomposition |
+| Tool / 外部世界 | Search、Scrape、MCP |
+| RAG / Context Engineering | keyword / Jev / embeddings |
+| 并发 | `asyncio.gather`、Semaphore、WorkerPool |
+| 子 Agent | Detailed Report / Deep Research |
+| 多 Agent | LangGraph Chief Editor workflow |
+| Provider 抽象 | 多 LLM、多 Retriever |
+| 结构化输出 | JSON repair / normalization |
+| 容错 | retry、fallback、partial failure |
+| 成本 | step cost tracking |
+| 可观测性 | WebSocket events、logs |
+| Evaluation | context filter eval、quality eval |
 
-```text
-gpt_researcher/
-├── agent.py                    # ★ GPTResearcher：总编排器 / Facade
-├── prompts.py                  # ★ Prompt Family
-├── actions/
-│   ├── agent_creator.py        # ★ 自动角色生成
-│   ├── query_processing.py     # ★ 搜索 + Sub-query 规划
-│   ├── retriever.py            # ★ Retriever Factory
-│   ├── web_scraping.py         # 抓取动作
-│   ├── report_generation.py    # ★ 最终报告 LLM 调用
-│   └── markdown_processing.py
-├── skills/
-│   ├── researcher.py           # ★ ResearchConductor：普通研究主链路
-│   ├── context_manager.py      # ★ Context 入口
-│   ├── browser.py              # ★ 抓取编排
-│   ├── writer.py               # ★ ReportGenerator
-│   ├── deep_research.py        # ★ 递归 Deep Research
-│   ├── curator.py              # Source Curation
-│   └── image_generator.py
-├── context/
-│   ├── select.py               # ★ Context Filter 策略路由
-│   ├── lexical.py              # BM25/关键词路径
-│   ├── jev_filter.py           # Jev 路径
-│   └── compression.py          # Embedding/VectorStore 压缩
-├── retrievers/                 # Tavily / Google / Bing / Exa / MCP / 学术搜索...
-├── scraper/                    # BeautifulSoup / Browser / PDF 等抓取实现
-├── llm_provider/               # 多 LLM Provider 适配
-├── memory/                     # Embedding 抽象
-├── vector_store/               # Vector Store Wrapper
-├── mcp/                        # MCP 相关实现
-└── config/                     # 配置系统
+因此它适合用来学习“**Agent 怎么从 Demo 走向工程系统**”。
 
-backend/
-├── report_type/
-│   ├── basic_report/           # conduct_research → write_report
-│   └── detailed_report/        # Main Research + Subtopic Researchers
-└── server/                     # FastAPI / WebSocket / Streaming
-
-multi_agents/                   # 另一套 LangGraph / AG2 多 Agent 路径
-```
+---
 
 ## 学习路线
 
-| 阶段 | 章节 | 你应该解决的问题 |
-|---|---|---|
-| Phase 0 | [阅读指南](docs/00-reading-guide.md) | 怎么读一个真实 Agent 项目，而不是迷失在目录里 |
-| Phase 1 | [01 架构总览](docs/01-architecture-overview.md) | 系统有哪些层？核心对象怎么协作？ |
-| Phase 1 | [02 主链路](docs/02-main-agent-lifecycle.md) | 一次 Research 从请求到 Report 完整经过什么？ |
-| Phase 1 | [03 Planning](docs/03-planning-and-query-decomposition.md) | Agent 如何选角色、拆 Query、调用 Strategic LLM？ |
-| Phase 2 | [04 Retrieval 与 MCP](docs/04-retrieval-and-mcp.md) | 多 Retriever 如何统一？MCP 为什么有 fast/deep/disabled？ |
-| Phase 2 | [05 Browser 与 Scraping](docs/05-browsing-and-scraping.md) | Search Result 如何变成可信正文？如何去重与并发抓取？ |
-| Phase 2 | [06 Context Engineering](docs/06-context-engineering.md) | keyword/Jev/embedding/none 怎么选？为什么要压缩？ |
-| Phase 2 | [07 Report Generation](docs/07-report-generation.md) | Context 怎样变成带结构的最终报告？ |
-| Phase 3 | [08 Deep Research](docs/08-deep-research.md) | breadth/depth/递归/并发/Follow-up Question 如何工作？ |
-| Phase 3 | [09 Detailed Report 与子 Agent](docs/09-detailed-report-and-subagents.md) | 为什么要给每个子主题创建新 Researcher？ |
-| Phase 3 | [10 配置与 Provider](docs/10-config-and-provider.md) | 多模型、多 Retriever、插件扩展是怎样解耦的？ |
-| Phase 3 | [11 Backend 与可观测性](docs/11-backend-streaming-observability.md) | API、WebSocket、Streaming、日志与成本怎样串起来？ |
-| Phase 4 | [12 并发、容错与工程化](docs/12-reliability-concurrency-cost.md) | 这套 Agent 如何避免“一处失败，全链路崩掉”？ |
-| Phase 4 | [13 源码走读地图](docs/13-source-code-walkthrough.md) | 面试前如何从关键函数反向复述源码？ |
-| Phase 4 | [14 架构评价与对比](docs/14-design-analysis.md) | 与 Claude Code / Nanobot / ReAct 的异同是什么？ |
-| Phase 5 | [15 面试与简历](docs/15-interview-and-resume.md) | 怎么把“读过源码”转化成可验证的项目能力？ |
-| Phase 5 | [16 二次开发路线](docs/16-hands-on-roadmap.md) | 如何把学习项目升级成真正属于自己的项目？ |
-| Phase 5 | [17 Tests 与 Evals](docs/17-testing-and-evals.md) | 怎样从测试反推历史 Bug，并建立 Agent 质量评测？ |
-| Phase 5 | [18 Multi-Agent LangGraph](docs/18-multi-agent-langgraph.md) | 独立多 Agent 路径如何做角色分工、并行研究与审核闭环？ |
-| Appendix | [99 Source Snapshot](docs/99-source-snapshot.md) | 固定上游提交与参考范围，避免版本漂移。 |
+### Phase 1：先建立直觉
 
-## 建议的阅读顺序
+| 章节 | 你会解决什么问题 | 建议时间 |
+|---|---|---:|
+| [01 - 什么是 Research Agent](docs/01-what-is-research-agent/README.md) | Research Agent 和普通 LLM / RAG / ReAct 有什么区别？ | 1h |
+| [02 - GPT Researcher 项目概览](docs/02-gpt-researcher-overview/README.md) | 项目有哪些模式？目录怎么看？先读哪些文件？ | 1h |
 
-**只有 30 分钟**：README → 01 → 02 → 06 → 14。
+### Phase 2：真正理解主链路
 
-**准备 Agent 面试**：01 → 02 → 03 → 04 → 06 → 08 → 09 → 12 → 15。
+| 章节 | 你会解决什么问题 | 建议时间 |
+|---|---|---:|
+| [03 - 架构深入解析](docs/03-architecture-deep-dive/README.md) | 核心对象如何协作？数据是怎么流动的？ | 2h |
+| [04 - 源码逐行走读](docs/04-source-code-walkthrough/README.md) | 从入口一路追到 Search、Scrape、Context、Writer | 4h |
+| [05 - Planning、Retrieval 与 MCP](docs/05-planning-retrieval-mcp/README.md) | Query 怎么拆？Retriever 怎么统一？MCP 怎么接入？ | 2h |
+| [06 - Scraping、Context 与报告生成](docs/06-context-and-writing/README.md) | 搜索结果怎么变成证据？证据怎么变成报告？ | 2h |
 
-**准备二次开发**：02 → 04 → 05 → 06 → 10 → 11 → 12 → 16。
+### Phase 3：高级 Agent 工作流
 
-**想从源码验证每个结论**：直接打开 [13 源码走读地图](docs/13-source-code-walkthrough.md)，按“入口函数 → 子函数 → 数据结构”的顺序跳转。
+| 章节 | 你会解决什么问题 | 建议时间 |
+|---|---|---:|
+| [07 - Deep / Detailed / Multi-Agent](docs/07-advanced-workflows/README.md) | 三种高级模式到底有什么区别？ | 2.5h |
+| [08 - 工程化：并发、容错、成本、可观测性](docs/08-engineering/README.md) | 为什么一个真实 Agent 远不止 Prompt？ | 2h |
+| [09 - Tests 与 Evals](docs/09-tests-and-evals/README.md) | 怎么从测试理解历史 Bug？怎么评测 Agent？ | 1.5h |
 
-## 这份笔记采用的分析方法
+### Phase 4：从“读源码”变成“自己的项目”
 
-参考：
+| 章节 | 你会解决什么问题 | 建议时间 |
+|---|---|---:|
+| [10 - 动手改造路线](docs/10-hands-on-roadmap/README.md) | 怎么调试、改造、做 Benchmark？ | 3h+ |
+| [11 - 面试与简历](docs/11-interview-and-resume/README.md) | 面试怎么讲？哪些内容能真实写进简历？ | 1.5h |
 
-- [how-claude-code-works](https://github.com/Windy3f3f3f3f/how-claude-code-works)：按“主循环、上下文工程、工具系统、多 Agent、可观测性”等**机制**拆章，强调源码定位、调用链和“为什么这样设计”。
-- [learn-nanobot](https://github.com/bcefghj/learn-nanobot)：按**求职学习路线**组织，加入源码走读、架构图、面试问答和简历表达。
+源码版本见 [99 - Source Snapshot](docs/99-source-snapshot/README.md)。
 
-但不会复制两者内容。对 GPT Researcher 的结论直接来自上游源码，并尽量遵循：
+---
 
-1. **先画数据流，再讲类。**
-2. **先讲 Why，再讲 How。**
-3. **关键结论给出源码文件与函数。**
-4. **明确区分普通 Research、Deep Research、Detailed Report、Multi-Agent 四条路径。**
-5. **不仅描述 happy path，也看异常处理、重试、fallback、并发和成本。**
-6. **指出实现中的 trade-off，而不是把所有代码都解释成“优秀设计”。**
+## 全书贯穿的示例
 
-## 读源码时最重要的五个结论
+为了避免每一章换一个问题，我们会一直使用这个示例：
 
-### 1. `GPTResearcher` 不是核心算法本体，而是 Facade
+> **研究问题：比较 LangGraph、AutoGen、CrewAI 在 Agent 编排、状态管理、可观测性方面的设计差异，并给出适用场景。**
 
-`gpt_researcher/agent.py` 主要负责状态、依赖和生命周期编排。真正普通研究逻辑在 `skills/researcher.py::ResearchConductor`，写作在 `skills/writer.py::ReportGenerator`。
-
-### 2. Planning 不是“凭空拆问题”
-
-当前主链路会先拿一次初始 Search Result，再让 Strategic LLM 基于 Query + 搜索上下文生成 Sub-Queries。这样规划阶段拥有最低限度的外部世界信息，而不是只依赖模型参数记忆。
-
-### 3. Search 和 Context 是两层问题
-
-Retriever 解决“**去哪找**”，Scraper 解决“**把页面正文拿回来**”，Context Manager 解决“**哪些内容值得送进 LLM**”。把三者混成一个 RAG 步骤，会错过项目最关键的工程分层。
-
-### 4. Context Filter 是当前版本的重要工程优化
-
-当前支持：
+你会一路看到它如何变成：
 
 ```text
-auto
-├── TYPESAFE_API_KEY 存在 → jev
-└── 否则                 → keyword
-
-jev         → 外部 relevance scoring
-keyword     → 本地 BM25 / lexical ranking
-embeddings  → chunk + embedding similarity
-none        → 不过滤
+原始 Query
+↓
+研究角色
+↓
+Initial Search Results
+↓
+Sub Queries
+↓
+Search Results
+↓
+URLs / raw_content
+↓
+Scraped Pages
+↓
+Filtered Context
+↓
+Final Report
 ```
 
-失败会尽量降级到 keyword，而不是让研究任务直接失败。
+这能帮助你真正理解“数据怎么流”，而不只是记类名。
 
-### 5. Deep Research 是“递归 Researcher”，不是单次 Prompt 加长
+---
 
-每个探索 Query 都会创建一个新的 `GPTResearcher` 执行正常研究，再从结果中抽取 learnings / follow-up questions，并在剩余 depth 内继续下钻。它把“深度”显式映射成搜索树，而不是简单把 `MAX_ITERATIONS` 调大。
+## 你不需要一开始就懂这些词
 
-## 默认配置快照
+第一次读时，下面这些词只需要有模糊印象：
 
-上游当前默认值（以本仓库分析提交为准）：
+- Retriever：负责“找候选资料”
+- Scraper：负责“真正读取网页正文”
+- Context：最终准备给 LLM 的研究证据
+- Provider：OpenAI、Anthropic 等模型供应商适配层
+- MCP：一种连接外部工具/数据源的标准协议
+- Sub Query：从大研究问题拆出来的小研究问题
 
-| 配置 | 默认值 | 作用 |
-|---|---:|---|
-| `RETRIEVER` | `tavily` | 默认搜索 Provider |
-| `FAST_LLM` | `openai:gpt-5.4-mini` | 轻量模型 |
-| `SMART_LLM` | `openai:gpt-5.4` | 写作/高质量任务 |
-| `STRATEGIC_LLM` | `openai:gpt-5.4` | Planning / Reasoning |
-| `MAX_ITERATIONS` | `3` | 普通 Research 的 Query 规划数量相关上限 |
-| `MAX_SEARCH_RESULTS_PER_QUERY` | `5` | 每 Query 搜索结果 |
-| `CONTEXT_FILTER` | `auto` | Context 路由 |
-| `MAX_SCRAPER_WORKERS` | `15` | 抓取 Worker 数 |
-| `DEEP_RESEARCH_BREADTH` | `3` | Deep Research 每层宽度 |
-| `DEEP_RESEARCH_DEPTH` | `2` | Deep Research 深度 |
-| `DEEP_RESEARCH_CONCURRENCY` | `4` | Deep Research 并发 |
-| `MCP_STRATEGY` | `fast` | MCP 执行策略 |
-| `TOTAL_WORDS` | `1200` | 报告目标长度 |
+后面的章节会第一次出现时重新解释。
 
-> 注意：上游更新频繁，默认模型和参数尤其容易变化。面试中不要死背数值，要能解释它们分别控制哪一层。
+---
 
-## 求职导向：最终要能讲清楚什么
+## 四种运行模式先记住名字
 
-学完这份笔记，你至少应该能不看代码回答：
+GPT Researcher 仓库里容易混淆的是四条路径：
 
-> “GPT Researcher 采用一个面向 research domain 的显式 workflow。入口 `GPTResearcher` 负责 orchestration，常规研究由 `ResearchConductor` 执行。它先基于初始搜索结果使用 strategic model 做 query decomposition，再并发执行 sub-query；每个 sub-query 经过多 Retriever、URL 去重、抓取和 context filtering，最后聚合为研究上下文。Writer 再根据 report type 构建 Prompt，由 smart model 生成报告。Deep Research 在这条链路上递归创建 nested researcher，用 breadth/depth 控制搜索树。工程上它通过 asyncio 并发、MCP cache/lock、visited URL 去重、LLM retry、JSON repair、context fallback 和 step cost accounting 提升可靠性与成本可控性。”
+```text
+Basic Research
+  → 普通研究主链路
 
-如果这段话你能继续向下追问 20 分钟仍然说得清楚，这个项目才真正适合写到简历里。
+Detailed Report
+  → 按章节创建子 Researcher，适合长报告
 
-## 上游源码锚点
+Deep Research
+  → 根据研究结果继续生成 Follow-up Questions，递归下钻
 
-分析快照：`0957c301ed06c2a5857b834358c7227c739041d4`
+Multi-Agent
+  → LangGraph 编排 Editor / Researcher / Writer / Fact Checker 等角色
+```
 
-- [GPTResearcher](https://github.com/assafelovic/gpt-researcher/blob/0957c301ed06c2a5857b834358c7227c739041d4/gpt_researcher/agent.py)
-- [ResearchConductor](https://github.com/assafelovic/gpt-researcher/blob/0957c301ed06c2a5857b834358c7227c739041d4/gpt_researcher/skills/researcher.py)
-- [ContextManager](https://github.com/assafelovic/gpt-researcher/blob/0957c301ed06c2a5857b834358c7227c739041d4/gpt_researcher/skills/context_manager.py)
-- [Context selection](https://github.com/assafelovic/gpt-researcher/blob/0957c301ed06c2a5857b834358c7227c739041d4/gpt_researcher/context/select.py)
-- [ReportGenerator](https://github.com/assafelovic/gpt-researcher/blob/0957c301ed06c2a5857b834358c7227c739041d4/gpt_researcher/skills/writer.py)
-- [DeepResearchSkill](https://github.com/assafelovic/gpt-researcher/blob/0957c301ed06c2a5857b834358c7227c739041d4/gpt_researcher/skills/deep_research.py)
-- [DetailedReport](https://github.com/assafelovic/gpt-researcher/blob/0957c301ed06c2a5857b834358c7227c739041d4/backend/report_type/detailed_report/detailed_report.py)
-- [Config defaults](https://github.com/assafelovic/gpt-researcher/blob/0957c301ed06c2a5857b834358c7227c739041d4/gpt_researcher/config/variables/default.py)
+**先学 Basic，再学另外三种。**
+
+如果一开始就从 Multi-Agent 或 Deep Research 读，很容易迷失。
+
+---
+
+## 源码阅读原则
+
+本仓库不要求你“把全部代码逐行背下来”。
+
+真正应该掌握的是：
+
+```text
+这个函数为什么存在？
+输入是什么？
+输出是什么？
+它修改了哪些状态？
+下一步调用谁？
+哪里可能失败？
+失败后怎么处理？
+为什么不用更简单的实现？
+```
+
+源码学习的目标不是“看过”，而是**能解释设计决策**。
+
+---
+
+## 最终你应该能回答
+
+完成前 9 章后，你应该可以不看源码解释：
+
+1. GPT Researcher 为什么不是一个经典的 ReAct while-loop？
+2. `GPTResearcher` 和 `ResearchConductor` 分别负责什么？
+3. 为什么 Planning 之前还要做一次 Initial Search？
+4. Retriever 和 Scraper 为什么必须分开？
+5. 搜到 20 个网页以后，为什么不能全部塞给 LLM？
+6. keyword / Jev / embeddings Context Filter 有什么区别？
+7. Deep Research 的 breadth / depth / concurrency 分别控制什么？
+8. Detailed Report 为什么默认顺序生成子章节？
+9. MCP fast / deep 为什么是成本与覆盖率的权衡？
+10. 一次研究失败可能发生在哪些层？
+11. 怎么评价一次优化到底是真的变好，还是只是“感觉更好”？
+
+如果这些问题能追问 20 分钟，你才真正适合把这个项目放到 Agent 岗位简历里。
+
+---
+
+## 版本说明
+
+本仓库分析基于 GPT Researcher：
+
+- Repository: [assafelovic/gpt-researcher](https://github.com/assafelovic/gpt-researcher)
+- Commit: `0957c301ed06c2a5857b834358c7227c739041d4`
+- Date: 2026-09-26
+
+> 上游变化很快，所以文档中涉及实现细节时，以固定提交为准，而不是假设未来 `main` 永远相同。
+
+---
 
 ## 声明
 
-本仓库用于学习、源码阅读和求职准备。GPT Researcher 及参考项目的版权和许可归各自作者与项目所有；本文档中的源码链接用于定位与讨论，不将上游源码复制为本仓库实现。
+本仓库是个人学习、源码分析和求职准备材料，不是 GPT Researcher 官方文档。源码版权和许可证归上游项目所有；文档中的代码片段以解释调用链为目的，并尽量使用裁剪后的关键逻辑或伪代码。
